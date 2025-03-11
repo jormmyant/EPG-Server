@@ -24,13 +24,16 @@ if ($Config['interval_time'] !== 0) {
     }
 }
 
-// 过渡到新的 md5 密码并生成 token（如果不存在或为空）
-if (!preg_match('/^[a-f0-9]{32}$/i', $Config['manage_password']) || empty($Config['token'])) {
+// 过渡到新的 md5 密码并生成默认 token、user_agent （如果不存在或为空）
+if (!preg_match('/^[a-f0-9]{32}$/i', $Config['manage_password']) || empty($Config['token']) || empty($Config['user_agent'])) {
     if (!preg_match('/^[a-f0-9]{32}$/i', $Config['manage_password'])) {
         $Config['manage_password'] = md5($Config['manage_password']);
     }
     if (empty($Config['token'])) {
         $Config['token'] = substr(bin2hex(random_bytes(5)), 0, 10);  // 生成 10 位随机字符串
+    }
+    if (empty($Config['user_agent'])) {
+        $Config['user_agent'] = substr(bin2hex(random_bytes(5)), 0, 10);  // 生成 10 位随机字符串
     }
     file_put_contents($configPath, json_encode($Config, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 }
@@ -172,7 +175,7 @@ try {
             'get_update_logs', 'get_cron_logs', 'get_channel', 'get_epg_by_channel',
             'get_icon', 'get_channel_bind_epg', 'get_channel_match', 'get_gen_list',
             'get_live_data', 'parse_source_info', 'toggle_status', 
-            'download_data', 'delete_unused_icons', 'delete_unused_source',
+            'download_data', 'delete_unused_icons', 'delete_unused_live_data',
             'get_version_log'
         ];
         $action = key(array_intersect_key($_GET, array_flip($action_map))) ?: '';
@@ -339,26 +342,49 @@ try {
                 break;
             
             case 'get_live_data':
-                // 读取 source.txt 文件内容
-                $sourceFilePath = $liveDir . 'source.txt';
-                $sourceContent = file_exists($sourceFilePath) ? file_get_contents($sourceFilePath) : '';
-
-                // 读取 template.txt 文件内容
-                $templateFilePath = $liveDir . 'template.txt';
-                $templateContent = file_exists($templateFilePath) ? file_get_contents($templateFilePath) : '';
-
-                // 读取 channels.csv 文件内容
-                $csvFilePath = $liveDir . 'channels.csv';
-                $channelsData = [];
-                if (file_exists($csvFilePath)) {
-                    $csvFile = fopen($csvFilePath, 'r');
-                    $header = fgetcsv($csvFile); // 读取表头
-                    while (($row = fgetcsv($csvFile)) !== false) {
-                        if (count($row) !== count($header)) break; // 如果字段数量不一致，跳出循环
-                        $channelsData[] = array_combine($header, $row); // 动态关联表头与行数据
-                    }
-                    fclose($csvFile);
+                // 读取文件内容
+                function readFileContent($filePath) {
+                    return file_exists($filePath) ? file_get_contents($filePath) : '';
                 }
+
+                $sourceContent = readFileContent($liveDir . 'source.txt');
+                $templateContent = readFileContent($liveDir . 'template.txt');
+
+                // 读取 CSV 文件并返回关联数组
+                function readCsvFile($filePath, $key = null) {
+                    if (!file_exists($filePath)) return [];
+
+                    $data = [];
+                    if (($file = fopen($filePath, 'r')) !== false) {
+                        $header = fgetcsv($file);
+                        while (($row = fgetcsv($file)) !== false) {
+                            if (empty(array_filter($row)) || count($row) !== count($header)) continue;
+
+                            $rowData = array_combine($header, $row);
+                            if ($key && isset($rowData[$key])) {
+                                $data[$rowData[$key]] = $rowData; // 使用指定键映射
+                            } else {
+                                $data[] = $rowData;
+                            }
+                        }
+                        fclose($file);
+                    }
+                    return $data;
+                }
+
+                $channelsInfo = readCsvFile($liveDir . 'channels_info.csv', 'tag');
+                $channelsData = readCsvFile($liveDir . 'channels.csv');
+
+                // 更新 channelsData 中的 resolution 和 speed
+                foreach ($channelsData as &$row) {
+                    if (isset($channelsInfo[$row['tag']])) {
+                        $row['resolution'] = str_replace("x", "<br>x<br>", $channelsInfo[$row['tag']]['resolution']);
+                        $row['speed'] = $channelsInfo[$row['tag']]['speed'];
+                        if (is_numeric($row['speed'])) { $row['speed'] .= '<br>ms';}
+                    }
+                }
+
+                generateLiveFiles($channelsData, 'tv', $saveOnly = true); // 重新生成 M3U 和 TXT 文件
                 
                 $dbResponse = ['source_content' => $sourceContent, 'template_content' => $templateContent, 'channels' => $channelsData,];
                 break;
@@ -389,7 +415,7 @@ try {
                 // 下载数据
                 $url = filter_var(($_GET['url']), FILTER_VALIDATE_URL);
                 if ($url) {
-                    $data = downloadData($url, 5);
+                    $data = downloadData($url, '', 5);
                     if ($data !== false) {
                         $dbResponse = ['success' => true, 'data' => $data];
                     } else {
@@ -420,15 +446,15 @@ try {
                 $dbResponse = ['success' => true, 'message' => "共清理了 $deletedCount 个台标"];
                 break;
 
-            case 'delete_unused_source':
-                // 清理未在使用的直播源
+            case 'delete_unused_live_data':
+                // 清理未在使用的直播源缓存、未出现在频道列表中的修改记录
                 $sourceFilePath = $liveDir . 'source.txt';
                 $sourceContent = file_exists($sourceFilePath) ? file_get_contents($sourceFilePath) : '';
                 $urls = array_map('trim', explode("\n", $sourceContent));
 
                 // 遍历 live/file 目录，删除未使用的文件
                 $parentRltPath = '/' . basename(__DIR__) . '/data/live/file/'; // 相对路径
-                $deletedCount = 0;
+                $deletedFileCount = 0;
                 foreach (scandir($liveFileDir) as $file) {
                     if ($file === '.' || $file === '..') continue;
                     $fileRltPath = $parentRltPath . $file;
@@ -438,11 +464,49 @@ try {
                         return $url && (stripos($fileRltPath, $url) !== false || stripos($fileRltPath, $urlmd5) !== false);
                     })) {
                         if (@unlink($liveFileDir . $file)) { // 如果没有匹配的 URL，删除文件
-                            $deletedCount++;
+                            $deletedFileCount++;
                         }
                     }
                 }
-                $dbResponse = ['success' => true, 'message' => "共清理了 $deletedCount 个文件"];
+
+                // 删除 modifications.csv 未在 channels.csv 中出现的条目
+                $channelsFilePath = $liveDir . 'channels.csv';
+                $modificationsFilePath = $liveDir . 'modifications.csv';
+                
+                $deletedRecordCount = 0;
+                if (file_exists($channelsFilePath) && file_exists($modificationsFilePath)) {
+                    // 读取 channels.csv 中的 tag 字段
+                    $channelTags = [];
+                    $file = fopen($channelsFilePath, 'r');
+                    $header = fgetcsv($file);
+                    while (($row = fgetcsv($file)) !== false) {
+                        $channelTags[] = $row[array_search('tag', $header)];
+                    }
+                    fclose($file);
+                
+                    // 过滤 modifications.csv 数据并统计移除行数
+                    $file = fopen($modificationsFilePath, 'r');
+                    $modificationsHeader = fgetcsv($file);
+                    $filteredData = [];
+                    while (($row = fgetcsv($file)) !== false) {
+                        if (in_array($row[array_search('tag', $modificationsHeader)], $channelTags)) {
+                            $filteredData[] = $row;
+                        } else {
+                            $deletedRecordCount++;
+                        }
+                    }
+                    fclose($file);
+                
+                    // 写回过滤后的数据
+                    $file = fopen($modificationsFilePath, 'w');
+                    fputcsv($file, $modificationsHeader);
+                    foreach ($filteredData as $row) {
+                        fputcsv($file, $row);
+                    }
+                    fclose($file);
+                }
+                
+                $dbResponse = ['success' => true, 'message' => "共清理了 $deletedFileCount 个缓存文件， $deletedRecordCount 条修改记录。"];
                 break;
 
             case 'get_version_log':
@@ -687,7 +751,7 @@ try {
                     exit;
                 }
             
-                generateLiveFiles($content, 'tv'); // 重新生成 M3U 和 TXT 文件
+                generateLiveFiles($content, 'tv', $saveOnly = true); // 重新生成 M3U 和 TXT 文件
                 echo json_encode(['success' => true]);
                 exit;
 
