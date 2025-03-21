@@ -101,7 +101,7 @@ function updateConfigFields() {
 
     // 处理 URL 列表和频道别名
     $xml_urls = array_values(array_map(function($url) {
-        return preg_replace('/^#\s*(\S+)(\s*#.*)?$/', '# $1$2', trim(str_replace(["，", "："], [",", ":"], $url)));
+        return preg_replace('/^#\s*(\S+)(\s*#.*)?$/', '# $1$2', trim(str_replace(["，", "：", "！"], [",", ":", "!"], $url)));
     }, explode("\n", $xml_urls)));
     
     $interval_time = $interval_hour * 3600 + $interval_minute * 60;
@@ -402,7 +402,8 @@ try {
             case 'toggle_status':
                 // 切换状态
                 $toggleField = $_GET['toggle_button'] === 'toggleLiveSourceSyncBtn' ? 'live_source_auto_sync'
-                            : ($_GET['toggle_button'] === 'toggleLiveChannelNameProcessBtn' ? 'live_channel_name_process' : '');
+                            : ($_GET['toggle_button'] === 'toggleCheckSpeedSyncBtn' ? 'check_speed_auto_sync' 
+                            : ($_GET['toggle_button'] === 'toggleLiveChannelNameProcessBtn' ? 'live_channel_name_process' : ''));
                 $currentStatus = isset($Config[$toggleField]) && $Config[$toggleField] == 1 ? 1 : 0;
                 $newStatus = ($currentStatus == 1) ? 0 : 1;
                 $Config[$toggleField] = $newStatus;
@@ -428,19 +429,13 @@ try {
 
             case 'delete_unused_icons':
                 // 清理未在使用的台标
-                $iconUrls = array_merge(
-                    array_map(function($url) { return parse_url($url, PHP_URL_PATH); }, $iconList),
-                    [parse_url($Config["default_icon"], PHP_URL_PATH)]
-                );
+                $iconUrls = array_merge($iconList, [$Config["default_icon"]]);
                 $iconPath = __DIR__ . '/data/icon';
                 $deletedCount = 0;
-                foreach (scandir($iconPath) as $file) {
-                    if ($file === '.' || $file === '..') continue;
-                    $iconRltPath = '/data/icon/' . $file;
-                    if (!in_array($iconRltPath, $iconUrls)) {
-                        if (@unlink($iconPath . '/' . $file)) {
-                            $deletedCount++;
-                        }
+                foreach (array_diff(scandir($iconPath), ['.', '..']) as $file) {
+                    $iconRltPath = "/data/icon/$file";
+                    if (!in_array($iconRltPath, $iconUrls) && @unlink("$iconPath/$file")) {
+                        $deletedCount++;
                     }
                 }
                 $dbResponse = ['success' => true, 'message' => "共清理了 $deletedCount 个台标"];
@@ -518,7 +513,7 @@ try {
                     return;
                 }
 
-                $localFile = 'assets/CHANGELOG.md';
+                $localFile = 'data/CHANGELOG.md';
                 $url = 'https://gitee.com/taksssss/EPG-Server/raw/main/CHANGELOG.md';
                 $isUpdated = false;
                 $updateMessage = '';
@@ -663,7 +658,7 @@ try {
                 $fileName = $file['name'];
                 $uploadFile = $iconDir . $fileName;
                 if ($file['type'] === 'image/png' && move_uploaded_file($file['tmp_name'], $uploadFile)) {
-                    $iconUrl = $serverUrl . '/data/icon/' . basename($fileName);
+                    $iconUrl = '/data/icon/' . basename($fileName);
                     echo json_encode(['success' => true, 'iconUrl' => $iconUrl]);
                 } else {
                     echo json_encode(['success' => false, 'message' => '文件上传失败']);
@@ -751,7 +746,8 @@ try {
                     exit;
                 }
             
-                generateLiveFiles($content, 'tv', $saveOnly = true); // 重新生成 M3U 和 TXT 文件
+                $fileName = $_POST['file_path'] ? 'file/' . md5(urlencode($_POST['file_path'])) : 'tv';
+                generateLiveFiles($content, $fileName, $saveOnly = true); // 重新生成 M3U 和 TXT 文件
                 echo json_encode(['success' => true]);
                 exit;
 
