@@ -147,7 +147,7 @@ function readEPGData($date, $oriChannelName, $cleanChannelName, $db, $type) {
 
     // 在解码和添加 icon 后再编码为 JSON
     $rowArray = json_decode($row, true);
-    $iconUrl = iconUrlMatch($rowArray['channel_name']) ?? iconUrlMatch($cleanChannelName) ?? iconUrlMatch($oriChannelName);
+    $iconUrl = iconUrlMatch($cleanChannelName) ?? iconUrlMatch($oriChannelName);
     $rowArray = array_merge(
         array_slice($rowArray, 0, array_search('source', array_keys($rowArray)) + 1),
         ['icon' => $iconUrl],
@@ -299,7 +299,7 @@ function fetchHandler($query_params) {
         }
 
         // 无法获取到数据时返回默认数据
-        $ret_default = !isset($Config['ret_default']) || $Config['ret_default'];
+        $ret_default = $Config['ret_default'] ?? true;
         $iconUrl = iconUrlMatch($cleanChannelName) ?? iconUrlMatch($oriChannelName);
         if ($type === 'diyp') {
             // 返回默认 diyp 数据
