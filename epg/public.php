@@ -18,6 +18,7 @@ $iconDir = __DIR__ . '/data/icon/'; @mkdir($iconDir, 0755, true);
 $liveDir = __DIR__ . '/data/live/'; @mkdir($liveDir, 0755, true);
 $liveFileDir = __DIR__ . '/data/live/file/'; @mkdir($liveFileDir, 0755, true);
 file_exists($configPath = __DIR__ . '/data/config.json') || copy(__DIR__ . '/assets/defaultConfig.json', $configPath);
+file_exists($customSourcePath = __DIR__ . '/data/customSource.php') || copy(__DIR__ . '/assets/defaultCustomSource.php', $customSourcePath);
 file_exists($iconListPath = __DIR__ . '/data/iconList.json') || file_put_contents($iconListPath, json_encode(new stdClass(), JSON_PRETTY_PRINT));
 ($iconList = json_decode(file_get_contents($iconListPath), true)) !== null || die("图标列表文件解析失败: " . json_last_error_msg());
 $iconListDefault = json_decode(file_get_contents(__DIR__ . '/assets/defaultIconList.json'), true) or die("默认图标列表文件解析失败: " . json_last_error_msg());
@@ -30,11 +31,10 @@ $host = $_SERVER['HTTP_X_FORWARDED_HOST'] ?? $_SERVER['HTTP_HOST'] ?? '';
 $scriptDir = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/');
 $serverUrl = $protocol . '://' . $host . $scriptDir;
 
-// 建立 xmltv 软链接
-if ($Config['gen_xml'] && file_exists($xmlFilePath = __DIR__ . '/data/t.xml')
-    && !file_exists($xmlLinkPath = __DIR__ . '/t.xml')) {
-    symlink($xmlFilePath, $xmlLinkPath);
-    symlink($xmlFilePath . '.gz', $xmlLinkPath . '.gz');
+// 移除 xmltv 软链接
+if (file_exists($xmlLinkPath = __DIR__ . '/t.xml')) {
+    unlink($xmlLinkPath);
+    unlink($xmlLinkPath . ".gz");
 }
 
 // 设置时区为亚洲/上海
@@ -92,9 +92,10 @@ function cleanChannelName($channel, $t2s = false) {
     global $Config;
     $channel_ori = $channel;
     
-    // 默认忽略 - 跟 空格
-    $channel_replacements = ['-', ' '];
-    $channel = str_replace($channel_replacements, '', $channel);
+    // 频道忽略字符，默认空格跟 -
+    $chars = array_map('trim', explode(',', $Config['channel_ignore_chars'] ?? "&nbsp, -"));
+    $ignore_chars = str_replace('&nbsp', ' ', $chars);
+    $channel = str_replace($ignore_chars, '', $channel);
 
     // 频道映射，优先级最高，支持正则表达式和多对一映射
     foreach ($Config['channel_mappings'] as $replace => $search) {
@@ -107,7 +108,7 @@ function cleanChannelName($channel, $t2s = false) {
             // 普通映射，可能为多对一
             $channels = array_map('trim', explode(',', $search));
             foreach ($channels as $singleChannel) {
-                if (strcasecmp($channel, str_replace($channel_replacements, '', $singleChannel)) === 0) {
+                if (strcasecmp($channel, str_replace($ignore_chars, '', $singleChannel)) === 0) {
                     return strtoupper($replace);
                 }
             }
@@ -127,13 +128,12 @@ function t2s($channel) {
 }
 
 // 台标模糊匹配
-function iconUrlMatch($originalChannel, $getDefault = true, $getFullUrl = true) {
+function iconUrlMatch($originalChannel, $getDefault = true) {
     global $Config, $iconListDefault, $iconListMerged, $serverUrl;
 
     // 精确匹配
     if (isset($iconListMerged[$originalChannel])) {
-        $finalIconUrl = $iconListMerged[$originalChannel];
-        return $getFullUrl && stripos($finalIconUrl, '/data/icon/') === 0 ?  $serverUrl . $finalIconUrl : $finalIconUrl;
+        return $iconListMerged[$originalChannel];
     }
 
     $bestMatch = null;
@@ -163,11 +163,11 @@ function iconUrlMatch($originalChannel, $getDefault = true, $getFullUrl = true) 
 
     // 如果没有找到匹配的图标，使用默认图标（如果配置中存在）
     $finalIconUrl = $iconUrl ?: ($getDefault ? ($Config['default_icon'] ?? null) : null);
-    return $getFullUrl && stripos($finalIconUrl, '/data/icon/') === 0 ?  $serverUrl . $finalIconUrl : $finalIconUrl;
+    return $finalIconUrl;
 }
 
 // 下载文件
-function downloadData($url, $userAgent = '', $timeout = 30, $connectTimeout = 10, $retry = 3) {
+function downloadData($url, $userAgent = '', $timeout = 120, $connectTimeout = 10, $retry = 3, &$error = null) {
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_SSL_VERIFYPEER => 0,
@@ -183,12 +183,13 @@ function downloadData($url, $userAgent = '', $timeout = 30, $connectTimeout = 10
             'Connection: keep-alive'
         ]
     ]);
-    while ($retry--) {
-        $data = curl_exec($ch);
-        if (!curl_errno($ch)) break;
+    $data = false;
+    $error = '未知错误';
+    while ($retry-- && ($data = curl_exec($ch)) === false) {
+        $error = curl_error($ch);
     }
     curl_close($ch);
-    return $data ?: false;
+    return $data;
 }
 
 // 日志记录函数
@@ -197,145 +198,40 @@ function logMessage(&$log_messages, $message) {
     echo date("[y-m-d H:i:s]") . " " . $message . "<br>";
 }
 
-// 下载 JSON 数据并存入数据库
-function downloadJSONData($data_source, $data_str, $db, &$log_messages, $replaceFlag = true) {
+// 抓取数据并存入数据库
+require_once 'scraper.php';
+function scrapeSource($source, $url, $db, &$log_messages) {
+    global $sourceHandlers;
+
+    if (empty($sourceHandlers[$source]['handler']) || !is_callable($sourceHandlers[$source]['handler'])) {
+        logMessage($log_messages, "【{$source}】处理函数未定义或不可调用");
+        return;
+    }
+
     $db->beginTransaction();
     try {
-        processJsonData($data_source, $data_str, $db, $log_messages, $replaceFlag);
+        $allChannelProgrammes = call_user_func($sourceHandlers[$source]['handler'], $url);
+
+        foreach ($allChannelProgrammes as $channelId => $channelProgrammes) {
+            $count = $channelProgrammes['process_count'] ?? 0;
+            if ($count > 0) {
+                insertDataToDatabase([$channelId => $channelProgrammes], $db, $source);
+            }
+            logMessage($log_messages, "【{$source}】{$channelProgrammes['channel_name']} " .
+                ($count > 0 ? "更新成功，共 {$count} 条" : "下载失败！！！"));
+        }
+
         $db->commit();
     } catch (Exception $e) {
         $db->rollBack();
-        logMessage($log_messages, "【{$data_source}】 " . $e->getMessage());
+        logMessage($log_messages, "【{$source}】处理出错：" . $e->getMessage());
     }
+
     echo "<br>";
 }
 
-// 处理 JSON 数据并存入数据库
-function processJsonData($data_source, $data_str, $db, &$log_messages, $replaceFlag) {
-    $processFunction = ($data_source === 'tvmao') ? 'processTvmaoJsonData' : 
-                       ($data_source === 'cntv' ? 'processCntvJsonData' : null);
-    if ($processFunction) {
-        $allChannelProgrammes = $processFunction($data_str);
-        foreach ($allChannelProgrammes as $channelId => $channelProgrammes) {
-            $processCount = $channelProgrammes['process_count'];
-            if ($processCount) {
-                insertDataToDatabase([$channelId => $channelProgrammes], $db, $data_source, $replaceFlag);
-            }
-            logMessage($log_messages, "【{$data_source}】 {$channelProgrammes['channel_name']} " . 
-                        ($processCount ? "更新成功，共 {$processCount} 条" : "下载失败！！！"));
-        }
-    }
-}
-
-// 处理 tvmao 数据
-function processTvmaoJsonData($data_str) {
-    $tvmaostr = str_ireplace('tvmao,', '', $data_str);
-    
-    $channelProgrammes = [];
-    foreach (explode(',', $tvmaostr) as $tvmao_info) {
-        list($channelName, $channelId) = array_map('trim', explode(':', trim($tvmao_info)) + [null, $tvmao_info]);
-        $channelProgrammes[$channelId]['channel_name'] = cleanChannelName($channelName);
-
-        $json_url = "https://sp0.baidu.com/8aQDcjqpAAV3otqbppnN2DJv/api.php?query={$channelId}&resource_id=12520&format=json";
-        $json_data = downloadData($json_url);
-        $json_data = mb_convert_encoding($json_data, 'UTF-8', 'GBK');
-        $data = json_decode($json_data, true);
-        if (empty($data['data'])) {
-            $channelProgrammes[$channelId]['process_count'] = 0;
-            continue;
-        }
-        $data = $data['data'][0]['data'];
-        $skipTime = null;
-        foreach ($data as $epg) {
-            if ($time_str = $epg['times'] ?? '') {
-                $starttime = DateTime::createFromFormat('Y/m/d H:i', $time_str);
-                $date = $starttime->format('Y-m-d');
-                // 如果第一条数据早于今天 02:00，则认为今天的数据是齐全的
-                if (is_null($skipTime)) {
-                    $skipTime = $starttime < new DateTime("today 02:00") ? 
-                                new DateTime("today 00:00") : new DateTime("tomorrow 00:00");
-                }
-                if ($starttime < $skipTime) continue;
-                $channelProgrammes[$channelId]['diyp_data'][$date][] = [
-                    'start' => $starttime->format('H:i'),
-                    'end' => '',  // 初始为空
-                    'title' => trim($epg['title']),
-                    'desc' => ''
-                ];
-            }
-        }
-        // 填充 'end' 字段
-        foreach ($channelProgrammes[$channelId]['diyp_data'] as $date => &$programmes) {
-            foreach ($programmes as $i => &$programme) {
-                $nextStart = $programmes[$i + 1]['start'] ?? '00:00';  // 下一个节目开始时间或 00:00
-                $programme['end'] = $nextStart;  // 填充下一个节目的 'start'
-                if ($nextStart === '00:00') {
-                    // 尝试获取第二天数据并补充
-                    $nextDate = (new DateTime($date))->modify('+1 day')->format('Y-m-d');
-                    $nextDayProgrammes = $channelProgrammes[$channelId]['diyp_data'][$nextDate] ?? [];
-                    if (!empty($nextDayProgrammes) && $nextDayProgrammes[0]['start'] !== '00:00') {
-                        array_unshift($channelProgrammes[$channelId]['diyp_data'][$nextDate], [
-                            'start' => '00:00',
-                            'end' => '',
-                            'title' => $programme['title'],
-                            'desc' => ''
-                        ]);
-                    }
-                }
-            }
-        }
-        $channelProgrammes[$channelId]['process_count'] = count($data);
-    }
-    return $channelProgrammes;
-}
-
-// 处理 cntv 数据
-function processCntvJsonData($data_str) {
-    $date_range = 1;
-    if (preg_match('/^cntv:(\d+),\s*(.*)$/i', $data_str, $matches)) {
-        $date_range = $matches[1]; // 提取日期范围
-        $cntvstr = $matches[2]; // 提取频道字符串
-    } else {
-        $cntvstr = str_ireplace('cntv,', '', $data_str); // 没有日期范围时去除 'cntv,'
-    }
-    $need_dates = array_map(function($i) { return (new DateTime())->modify("+$i day")->format('Ymd'); }, range(0, $date_range - 1));
-
-    $channelProgrammes = [];
-    foreach (explode(',', $cntvstr) as $cntv_info) {
-        list($channelName, $channelId) = array_map('trim', explode(':', trim($cntv_info)) + [null, $cntv_info]);
-        $channelId = strtolower($channelId);
-        $channelProgrammes[$channelId]['channel_name'] = cleanChannelName($channelName);
-
-        $processCount = 0;
-        foreach ($need_dates as $need_date) {
-            $json_url = "https://api.cntv.cn/epg/getEpgInfoByChannelNew?c={$channelId}&serviceId=tvcctv&d={$need_date}";
-            $json_data = downloadData($json_url);
-            $data = json_decode($json_data, true);
-            if (!isset($data['data'][$channelId]['list'])) {
-                continue;
-            }
-            $data = $data['data'][$channelId]['list'];
-            foreach ($data as $epg) {
-                $starttime = (new DateTime())->setTimestamp($epg['startTime']);
-                $endtime = (new DateTime())->setTimestamp($epg['endTime']);
-                $date = $starttime->format('Y-m-d');
-                $channelProgrammes[$channelId]['diyp_data'][$date][] = [
-                    'start' => $starttime->format('H:i'),
-                    'end' => $endtime->format('H:i'),
-                    'title' => trim($epg['title']),
-                    'desc' => ''
-                ];
-            }
-            $processCount += count($data);
-        }
-        $channelProgrammes[$channelId]['process_count'] = $processCount;
-    }
-
-    return $channelProgrammes;
-}
-
 // 插入数据到数据库
-function insertDataToDatabase($channelsData, $db, $sourceUrl, $replaceFlag = true) {
+function insertDataToDatabase($channelsData, $db, $sourceUrl) {
     global $processedRecords;
     global $Config;
 
@@ -358,7 +254,7 @@ function insertDataToDatabase($channelsData, $db, $sourceUrl, $replaceFlag = tru
             ], JSON_UNESCAPED_UNICODE);
 
             // 当天及未来数据覆盖，其他日期数据忽略
-            $action = $date >= date('Y-m-d') && $replaceFlag ? 'REPLACE' : 'IGNORE';
+            $action = $date >= date('Y-m-d') ? 'REPLACE' : 'IGNORE';
 
             // 根据数据库类型选择 SQL 语句
             if ($Config['db_type'] === 'sqlite') {
@@ -440,24 +336,48 @@ function doParseSourceInfo($urlLine = null) {
         $parts = explode('#', $line);
         $url = trim($parts[0]);
         $groupPrefix = $userAgent = $replacePattern = '';
+        $white_list = $black_list = [];
+
         foreach ($parts as $part) {
             $part = ltrim($part);
-            if (stripos($part, 'PF=') === 0) $groupPrefix = substr($part, 3);
-            elseif (stripos($part, 'UA=') === 0) $userAgent = substr(rtrim($part), 3);
-            elseif (stripos($part, 'RP=') === 0) $replacePattern = substr(rtrim($part), 3);
+            if (stripos($part, 'PF=') === 0 || stripos($part, 'prefix=') === 0) {
+                $groupPrefix = substr($part, strpos($part, '=') + 1);
+            } elseif (stripos($part, 'UA=') === 0 || stripos($part, 'useragent=') === 0) {
+                $userAgent = trim(substr($part, strpos($part, '=') + 1));
+            } elseif (stripos($part, 'RP=') === 0 || stripos($part, 'replace=') === 0) {
+                $replacePattern = trim(substr($part, strpos($part, '=') + 1));
+            } elseif (stripos($part, 'FT=') === 0 || stripos($part, 'filter=') === 0) {
+                $filter_raw = strtoupper(t2s(trim(substr($part, strpos($part, '=') + 1))));
+                $list = array_map('trim', explode(',', ltrim($filter_raw, '!')));
+                if (strpos($filter_raw, '!') === 0) {
+                    $black_list = $list;
+                } else {
+                    $white_list = $list;
+                }
+            }
         }
-    
+
         // 获取 URL 内容
-        $urlContent = (stripos($url, '/data/live/file/') === 0) 
-            ? @file_get_contents(__DIR__ . $url) 
-            : downloadData($url, $userAgent, 5);
+        $error = '';
+        $urlContent = '';
+        
+        if (stripos($url, '/data/live/file/') === 0) {
+            $urlContent = @file_get_contents(__DIR__ . $url);
+            if ($urlContent === false) {
+                $error = error_get_last()['message'] ?? 'file_get_contents failed with unknown error';
+            }
+        } else {
+            $urlContent = downloadData($url, $userAgent, 10, 10, 3, $error);
+        }
+        
         $fileName = md5(urlencode($url));  // 用 MD5 对 URL 进行命名
         $localFilePath = $liveFileDir . '/' . $fileName . '.m3u';
         
-        if (!$urlContent || stripos($urlContent, 'not found') !== false) {
+        if (($notFound = (stripos($urlContent, 'not found') !== false)) || !$urlContent) {
+            if ($notFound) $error = $urlContent;
             $urlContent = file_exists($localFilePath) ? file_get_contents($localFilePath) : '';
-            if (!$urlContent) { $errorLog .= "$url 解析失败<br>"; continue; }
-            else { $errorLog .= "$url 使用本地缓存<br>"; }
+            $errorLog .= $urlContent ? "$url 使用本地缓存<br>" : "解析失败：$url<br>错误信息：$error<br>";
+            if (!$urlContent) continue;
         }
         
         // 处理 GBK 编码
@@ -503,7 +423,7 @@ function doParseSourceInfo($urlLine = null) {
                         $tag = md5($url . $groupTitle . $originalChannelName . $streamUrl);
 
                         $rowData = [
-                            'groupTitle' => $groupPrefix . $groupTitle,
+                            'groupTitle' => ($groupPrefix && strpos($groupTitle, $groupPrefix) !== 0 ? $groupPrefix : '') . $groupTitle,
                             'channelName' => $originalChannelName,
                             'chsChannelName' => '',
                             'streamUrl' => $streamUrl,
@@ -534,11 +454,11 @@ function doParseSourceInfo($urlLine = null) {
                     }
             
                     $originalChannelName = trim($parts[0]);
-                    $streamUrl = trim($parts[1]);
+                    $streamUrl = trim($parts[1]) . (isset($parts[2]) && $parts[2] === '' ? ',' : ''); // 最后一个 , 后为空，则视为 URL 一部分
                     $tag = md5($url . $groupTitle . $originalChannelName . $streamUrl);
 
                     $rowData = [
-                        'groupTitle' => $groupPrefix . $groupTitle,
+                        'groupTitle' => ($groupPrefix && strpos($groupTitle, $groupPrefix) !== 0 ? $groupPrefix : '') . $groupTitle,
                         'channelName' => $originalChannelName,
                         'chsChannelName' => '',
                         'streamUrl' => $streamUrl,
@@ -558,10 +478,26 @@ function doParseSourceInfo($urlLine = null) {
 
         // 将所有 channelName 整合到一起，统一调用 t2s 进行繁简转换
         $channelNames = array_column($urlChannelData, 'channelName'); // 提取所有 channelName
-        $chsChannelNames = explode("\n", t2s(implode("\n", $channelNames))); // 繁简转换
+        $chsChannelNames = ($Config['cht_to_chs'] ?? 1) === 0 ? 
+            $channelNames : explode("\n", t2s(implode("\n", $channelNames))); // 繁简转换
 
         // 将转换后的信息写回 urlChannelData
         foreach ($urlChannelData as $index => &$row) {
+            // 如果不在白名单或在黑名单中，删除该行
+            $chsChannelName = $chsChannelNames[$index];
+            $groupTitle = $row['groupTitle'];
+            $streamUrl = $row['streamUrl'];
+            $in_white = empty($white_list) || array_filter($white_list, function ($w) use ($chsChannelName, $groupTitle, $streamUrl) {
+                return stripos($chsChannelName, $w) !== false || stripos($groupTitle, $w) !== false || stripos($streamUrl, $w) !== false;
+            });
+            $in_black = array_filter($black_list, function ($b) use ($chsChannelName, $groupTitle, $streamUrl) {
+                return stripos($chsChannelName, $b) !== false || stripos($groupTitle, $b) !== false || stripos($streamUrl, $b) !== false;
+            });
+            if (!$in_white || $in_black) {
+                unset($urlChannelData[$index]);
+                continue;
+            }
+
             // 检查该行是否已经修改
             if (isset($existingData[$row['tag']])) {
                 $row = $existingData[$row['tag']];
@@ -569,7 +505,6 @@ function doParseSourceInfo($urlLine = null) {
             }
 
             // 更新部分信息
-            $chsChannelName = $chsChannelNames[$index];
             $cleanChannelName = cleanChannelName($chsChannelName);
             $dbChannelName = dbChannelNameMatch($cleanChannelName);
             $finalChannelName = $dbChannelName ?: $cleanChannelName;
@@ -577,7 +512,7 @@ function doParseSourceInfo($urlLine = null) {
             $row['chsChannelName'] = $chsChannelName;
             $row['iconUrl'] = ($row['iconUrl'] ?? false) && ($Config['m3u_icon_first'] ?? false)
                             ? $row['iconUrl']
-                            : (iconUrlMatch($finalChannelName, true, false) ?: $row['iconUrl']);
+                            : (iconUrlMatch($finalChannelName) ?: $row['iconUrl']);
             $row['tvgName'] = $dbChannelName ?? $row['tvgName'];
         }
 
@@ -705,7 +640,7 @@ function generateLiveFiles($channelData, $fileName, $saveOnly = false) {
                             ($fuzzyMatchingEnable && ($cleanChsChannelName === $cleanChsGroupChannelName || 
                             stripos($cleanChsGroupChannelName, 'CGTN') === false && stripos($cleanChsGroupChannelName, 'CCTV') === false && !empty($cleanChsChannelName) && 
                             (stripos($cleanChsChannelName, $cleanChsGroupChannelName) || stripos($cleanChsGroupChannelName, $cleanChsChannelName)) || 
-                            (strpos($groupChannelName, 'regex:') === 0) && @preg_match(substr($groupChannelName, 6), $channelName)))) {
+                            (strpos($groupChannelName, 'regex:') === 0) && @preg_match(substr($groupChannelName, 6), $channelName . $cleanChsChannelName)))) {
                             // 更新信息
                             $streamParts = explode("<br>", $streamUrl);
                             $streamUrl = array_pop($streamParts);
@@ -805,7 +740,7 @@ function generateLiveFiles($channelData, $fileName, $saveOnly = false) {
         fclose($channelsFile);
         fclose($modificationsFile);
 
-        // 解析直播源文件时，另存一份用于测速校验
+        // 解析直播源文件时，另存一份用于测速校验（避免接口数量限制导致的问题）
         if(!$saveOnly) {
             $channelsOrigFilePath = $liveDir . 'channels_orig.csv';
             copy($channelsFilePath, $channelsOrigFilePath);

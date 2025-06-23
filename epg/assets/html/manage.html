@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <title>管理配置</title>
+    <title>EPG工具箱</title>
     <link rel="stylesheet" type="text/css" href="assets/css/manage.css">
     <link rel="stylesheet" type="text/css" href="assets/css/fa-5-15-4-all-min.css">
-    <link rel="icon" href="assets/html/favicon.ico" type="image/x-icon">
+    <link rel="icon" href="assets/img/favicon.ico" type="image/x-icon">
 </head>
 <body>
 <script>
@@ -38,7 +38,7 @@
         <label for="xml_urls">【EPG地址】</label>
         <span class="blue-span" id="channelbind" onclick="showModal('channelbindepg')">（频道指定源）</span>
         <br><br>
-        <textarea id="xml_urls" name="xml_urls" style="height: 122px;"><?php echo implode("\n", array_map('trim', $Config['xml_urls'])); ?></textarea>
+        <textarea id="xml_urls" name="xml_urls"><?php echo implode("\n", array_map('trim', $Config['xml_urls'])); ?></textarea>
         <br><br>
 
         <div class="form-row">
@@ -83,7 +83,7 @@
                 <span class="blue-span" id="iconInfo" onclick="showModal('icon')">（台标管理）</span>
                 <span class="blue-span" id="liveInfo" onclick="showModal('live')">（直播源管理）</span>
                 <br><br>
-                <textarea id="channel_mappings" name="channel_mappings" style="height: 142px;"><?php 
+                <textarea id="channel_mappings" name="channel_mappings"><?php 
                     echo implode("\n", array_map(function($search, $replace) {
                         return $search . ' => ' . $replace;
                     }, array_keys($Config['channel_mappings']), $Config['channel_mappings']));
@@ -99,6 +99,10 @@
             <a href="assets/tinyfilemanager/index.php" target="_blank">管理文件</a>
             <button type="button" onclick="showModal('cron')">定时日志</button>
             <button type="button" onclick="showModal('update')">更新日志</button>
+            <button type="button" id="accessLogBtn" onclick="showAccessLogModal()" 
+                style="display: <?php echo (isset($Config['debug_mode']) && $Config['debug_mode'] == 1) ? 'inline-block' : 'none'; ?>;">
+                访问日志
+            </button>
             <button type="button" onclick="showModal('moresetting')">更多设置</button>
             <button type="button" name="logoutbtn" onclick="logout()">退出</button>
         </div>
@@ -106,17 +110,18 @@
 </div>
 
 <!-- 底部显示 -->
-<div class="footer">
+<div class="footer" style="user-select: none;">
     <a href="https://github.com/taksssss/EPG-Server" target="_blank" style="color: #888; text-decoration: none;">
         https://github.com/taksssss/EPG-Server
     </a>
-    <a onclick="showVersionLog();" style="color: #888; cursor: pointer;">
+    <a onclick="showVersionLog();" style="color: #888;">
         <span id="version">v2024.11.25</span>
         版本日志
     </a>
-    <a onclick="showHelpModal();" style="color: #888; cursor: pointer;">使用说明</a>
-    <a href="https://gitee.com/taksssss/EPG-Server#-buy-me-a-coffee" target="_blank" style="color: #888; text-decoration: none;">
-        ☕捐赠
+    <a onclick="showHelpModal();" style="color: #888;">使用说明</a>
+    <a onclick="showDonationImage()" style="color: #888;">☕捐赠</a>
+    <a href="https://gitee.com/taksssss/EPG-Server/blob/main/DONATIONS.md" target="_blank" style="color: #888; text-decoration: none;">
+        🌹鸣谢列表
     </a>
 </div>
 
@@ -133,7 +138,7 @@
     <div class="modal-content version-update-modal-content">
         <span class="close">&times;</span>
         <h2>版本日志</h2>
-        <p id="versionLogMessage" style="height: 455px; overflow: auto;"></p>
+        <p id="versionLogMessage" style="height: 445px; overflow: auto;"></p>
     </div>
 </div>
 
@@ -142,7 +147,7 @@
     <div class="modal-content help-modal-content">
         <span class="close">&times;</span>
         <h2>使用说明</h2>
-        <div id="helpContent"></div>
+        <p id="helpMessage" style="height: 445px; overflow: auto;"></p>
     </div>
 </div>
 
@@ -187,7 +192,47 @@
     <div class="modal-content cron-log-modal-content">
         <span class="close">&times;</span>
         <h2>定时任务日志</h2>
-        <textarea id="cronLogContent" readonly style="width: 100%; height: 460px;"></textarea>
+        <textarea id="cronLogContent" readonly style="height: 458px; resize: none;"></textarea>
+    </div>
+</div>
+
+<!-- 访问日志模态框 -->
+<div id="accesslogModal" class="modal">
+    <div class="modal-content access-log-modal-content">
+        <span class="close">&times;</span>
+        <h2>访问日志</h2>
+        <p id="accessLogContent" style="height: 413px; overflow: auto; font-family: monospace; line-height: 1.5;"></p>
+        <div class="button-container">
+            <button type="button" onclick="showAccessStats()">访问统计</button>
+            <button type="button" onclick="clearAccessLog()">清空日志</button>
+            <button type="button" onclick="downloadAccessLog()">下载日志</button>
+        </div>
+    </div>
+</div>
+
+<!-- 访问统计模态框 -->
+<div id="accessStatsModal" class="modal">
+    <div class="modal-content access-stat-modal-content">
+        <span class="close">&times;</span>
+        <h2>访问统计</h2>
+        <div class="table-container" id="access-stats-table-container">
+            <table id="accessStatsTable">
+                <thead></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- IP 列表模态框 -->
+<div id="ipModal" class="modal">
+    <div class="modal-content ip-modal-content">
+        <span class="close">&times;</span>
+        <h2>IP 列表</h2>
+        <textarea id="ipListTextarea" style="width:100%; height:415px;"></textarea>
+        <div style="text-align: right; margin-top: 10px;">
+            <button onclick="saveIpList()">保存</button>
+        </div>
     </div>
 </div>
 
@@ -196,7 +241,7 @@
     <div class="modal-content channel-modal-content">
         <span class="close">&times;</span>
         <h2 id="channelModalTitle">频道列表</h2>
-        <input type="text" id="channelSearchInput" placeholder="搜索频道名..." onkeyup="filterChannels('channel')">
+        <input type="text" id="channelSearchInput" placeholder="搜索频道名..." oninput="filterChannels('channel')">
         <div class="table-container" id="channel-table-container">
             <table id="channelTable">
                 <thead style="position: sticky; top: 0; background-color: white;">
@@ -221,7 +266,7 @@
         <span class="close">&times;</span>
         <h2 id="iconModalTitle">频道列表</h2>
         <div style="display: flex;">
-            <input type="text" id="iconSearchInput" placeholder="搜索频道名..." onkeyup="filterChannels('icon')" style="flex: 1; margin-right: 10px;">
+            <input type="text" id="iconSearchInput" placeholder="搜索频道名..." oninput="filterChannels('icon')" style="flex: 1; margin-right: 10px;">
             <div style="width:auto; margin-right: 10px;">
                 <button id="deleteUnusedIcons" type="button" onclick="deleteUnusedIcons()">清理</button>
             </div>
@@ -298,6 +343,33 @@
     </div>
 </div>
 
+<!-- MySQL 配置模态框 -->
+<div id="mysqlConfigModal" class="modal">
+    <div class="modal-content mysql-config-modal-content" style="width:275px">
+        <span class="close">&times;</span>
+        <h2>MySQL 配置</h2><br>
+        <div><label>地址：<input type="text" id="mysql_host" value="<?php echo $Config['mysql']['host'] ?? ''; ?>" style="width:200px"></label></div>
+        <div><label>库名：<input type="text" id="mysql_dbname" value="<?php echo $Config['mysql']['dbname'] ?? ''; ?>" style="width:200px"></label></div>
+        <div><label>用户：<input type="text" id="mysql_username" value="<?php echo $Config['mysql']['username'] ?? ''; ?>" style="width:200px"></label></div>
+        <div><label>密码：<input type="text" id="mysql_password" value="<?php echo $Config['mysql']['password'] ?? ''; ?>" style="width:200px"></label></div>
+        <br>
+        <div><button type="button" onclick="mysqlConfigModal.style.display='none';updateConfig()">保存配置</button></div>
+    </div>
+</div>
+
+<!-- Redis 配置模态框 -->
+<div id="redisConfigModal" class="modal">
+    <div class="modal-content redis-config-modal-content" style="width:275px">
+        <span class="close">&times;</span>
+        <h2>Redis 配置</h2><br>
+        <div><label>地址：<input type="text" id="redis_host" placeholder="127.0.0.1" value="<?php echo $Config['redis']['host'] ?? ''; ?>" style="width:200px"></label></div>
+        <div><label>端口：<input type="text" id="redis_port" placeholder="6379" value="<?php echo $Config['redis']['port'] ?? ''; ?>" style="width:200px"></label></div>
+        <div><label>密码：<input type="text" id="redis_password" value="<?php echo $Config['redis']['password'] ?? ''; ?>" style="width:200px"></label></div>
+        <br>
+        <div><button type="button" onclick="redisConfigModal.style.display='none';saveAndTestRedisConfig()">保存配置</button></div>
+    </div>
+</div>
+
 <!-- 直播源管理模态框 -->
 <div id="liveSourceManageModal" class="modal">
     <div class="modal-content live-source-modal-content">
@@ -306,7 +378,7 @@
         <!-- 输入框使用 textarea 用于输入直播源 URL -->
         <div class="input-container">
             <label for="sourceUrlTextarea">【直播源地址】</label><br>
-            <textarea id="sourceUrlTextarea" style="height: 102px;"></textarea>
+            <textarea id="sourceUrlTextarea"></textarea>
         </div>
         <br>
         
@@ -315,7 +387,7 @@
             <input type="file" name="liveSourceFile" id="liveSourceFile" style="display: none;" accept=".m3u, .txt">
             <button id="uploadSourceBtn" onclick="document.getElementById('liveSourceFile').click()">上传源</button>
             <button id="parseSourceInfoBtn" onclick="parseSourceInfo()">解析源</button>
-            <button id="showLiveUrlBtn" onclick="showLiveUrl(`<?php echo strtok($Config['token'], ','); ?>`, `<?php echo $serverUrl; ?>`, `<?php echo $Config['token_range']; ?>`)">访问地址</button>
+            <button id="showLiveUrlBtn" onclick="showLiveUrl(`<?php echo strtok($Config['token'], PHP_EOL); ?>`, `<?php echo $serverUrl; ?>`, `<?php echo $Config['token_range']; ?>`)">访问地址</button>
             <button id="showLiveTemplateBtn" onclick="showLiveTemplate()">源模板</button>
             <button id="checkSourceBtn" onclick="showModal('chekspeed')">测速校验</button>
             <button id="saveSourceBtn" onclick="saveLiveSourceInfo()">保存</button>
@@ -323,7 +395,12 @@
             <button id="showMoreLiveSettingBtn" onclick="showModal('morelivesetting')">更多设置</button>
         </div>
         <br>
-        
+
+        <!-- 搜索框 -->
+        <div>
+            <input type="text" id="liveSourceSearchInput" placeholder="搜索频道名、tvg-id、tvg-name、直播地址或分组..." oninput="filterLiveSourceData()">
+        </div>
+
         <!-- 表格显示解析结果 -->
         <div class="table-container" id="live-source-table-container">
             <table id="liveSourceTable">
@@ -359,10 +436,26 @@
                 </tbody>
             </table>
         </div>
-        
-        <!-- 分页控件 -->
-        <div id="paginationContainer" style="margin-top: 15px; text-align: center;">
-            <!-- 分页按钮由 JavaScript 动态生成 -->
+
+        <!-- 分页控件 + 每页条数选择 -->
+        <div style="margin-top: 15px; display: flex; align-items: center;">
+            <!-- 占位块，拉开空间 -->
+            <div style="flex: 1;"></div>
+
+            <!-- 分页控件，居中显示 -->
+            <div id="paginationContainer" style="text-align: center;"></div>
+
+            <!-- 每页条数选择，靠右 -->
+            <div style="flex: 1; text-align: right;">
+                <label for="rowsPerPageSelect">每页显示：</label>
+                <select id="rowsPerPageSelect">
+                    <option value="50">50 条</option>
+                    <option value="100">100 条</option>
+                    <option value="150">150 条</option>
+                    <option value="200">200 条</option>
+                    <option value="500">500 条</option>
+                </select>
+            </div>
         </div>
     </div>
 </div>
@@ -458,7 +551,15 @@
                 </select>
             </div>
             <div class="column">
-            </div>
+                <label for="check_speed_interval_factor">间隔周期倍率：</label>
+                <select id="check_speed_interval_factor" name="check_speed_interval_factor" required>
+                    <?php for ($i = 1; $i <= 10; $i++): ?>
+                        <option value="<?php echo $i ?>" <?php echo ($Config['check_speed_interval_factor'] ?? 1) == $i ? 'selected' : '' ?>>
+                            <?php echo $i ?>
+                        </option>
+                    <?php endfor; ?>
+                </select>
+            </div>            
         </div>
 
         <!-- 第三行 -->
@@ -600,43 +701,39 @@
         <!-- 第三行 -->
         <div class="row">
             <div class="column">
-                <label for="all_chs" title="">全转简中：</label>
-                <select id="all_chs" name="all_chs" required>
-                    <option value="1" <?php if (isset($Config['all_chs']) && $Config['all_chs'] == 1) echo 'selected'; ?>>是</option>
-                    <option value="0" <?php if (!isset($Config['all_chs']) || $Config['all_chs'] == 0) echo 'selected'; ?>>否</option>
+                <label for="cht_to_chs" title="">繁體转简体：</label>
+                <select id="cht_to_chs" name="cht_to_chs" required onchange="chtToChsChanged(this)">
+                    <option value="0" <?php echo ($Config['cht_to_chs'] ?? 1) == 0 ? 'selected' : '' ?>>关闭</option>
+                    <option value="1" <?php echo ($Config['cht_to_chs'] ?? 1) == 1 ? 'selected' : '' ?>>仅频道名</option>
+                    <option value="2" <?php echo ($Config['cht_to_chs'] ?? 1) == 2 ? 'selected' : '' ?>>所有信息</option>
                 </select>
             </div>
             <div class="column">
                 <label for="db_type">数据库：</label>
-                <select id="db_type" name="db_type" required>
-                    <option value="sqlite" <?php if (!isset($Config['db_type']) || $Config['db_type'] == 'sqlite') echo 'selected'; ?>>SQLite</option>
-                    <option value="mysql" <?php if (isset($Config['db_type']) && $Config['db_type'] == 'mysql') echo 'selected'; ?>>MySQL</option>
+                <select id="db_type" name="db_type" required onchange="changeDbType(this)">
+                    <option value="sqlite" <?php echo ($Config['db_type'] ?? 'sqlite') == 'sqlite' ? 'selected' : ''?>>SQLite</option>
+                    <option value="mysql" <?php echo ($Config['db_type'] ?? 'sqlite') == 'mysql' ? 'selected' : ''?>>MySQL</option>
                 </select>
             </div>
             <div class="column">
-                <label for="mysql_host">地址：</label>
-                <textarea id="mysql_host"><?php echo htmlspecialchars($Config['mysql']['host'] ?? ''); ?></textarea>
+                <label for="cached_type">数据缓存：</label>
+                <select id="cached_type" name="cached_type" required onchange="changeCachedType(this)">
+                    <option value="memcached" <?php echo ($Config['cached_type'] ?? 'memcached') == 'memcached' ? 'selected' : ''?>>Memcached</option>
+                    <option value="redis" <?php echo ($Config['cached_type'] ?? 'memcached') == 'redis' ? 'selected' : ''?>>Redis</option>
+                </select>
             </div>
         </div>
 
         <!-- 第四行 -->
         <div class="row">
             <div class="column">
-                <label for="mysql_dbname">库名：</label>
-                <textarea id="mysql_dbname"><?php echo htmlspecialchars($Config['mysql']['dbname'] ?? ''); ?></textarea>
+                <label for="ip_list_mode"><span class="blue-span" onclick="showIpModal()">IP 列表</span>：</label>
+                <select id="ip_list_mode" name="ip_list_mode" required onchange="showIpModal()">
+                    <option value="0" <?php echo ($Config['ip_list_mode'] ?? 0) == 0 ? 'selected' : '' ?>>不使用</option>
+                    <option value="1" <?php echo ($Config['ip_list_mode'] ?? 0) == 1 ? 'selected' : '' ?>>白名单模式</option>
+                    <option value="2" <?php echo ($Config['ip_list_mode'] ?? 0) == 2 ? 'selected' : '' ?>>黑名单模式</option>
+                </select>
             </div>
-            <div class="column">
-                <label for="mysql_username">用户：</label>
-                <textarea id="mysql_username"><?php echo htmlspecialchars($Config['mysql']['username'] ?? ''); ?></textarea>
-            </div>
-            <div class="column">
-                <label for="mysql_password">密码：</label>
-                <textarea id="mysql_password"><?php echo htmlspecialchars($Config['mysql']['password'] ?? ''); ?></textarea>
-            </div>
-        </div>
-
-        <!-- 第五行 -->
-        <div class="row">
             <div class="column">
                 <label for="check_update">检查版本更新：</label>
                 <select id="check_update" name="check_update" required>
@@ -645,19 +742,36 @@
                 </select>
             </div>
             <div class="column">
+                <label for="debug_mode">调试模式：</label>
+                <select id="debug_mode" name="debug_mode" required onchange="debugMode(this)">
+                    <option value="1" <?php if (isset($Config['debug_mode']) && $Config['debug_mode'] == 1) echo 'selected'; ?>>是</option>
+                    <option value="0" <?php if (!isset($Config['debug_mode']) || $Config['debug_mode'] == 0) echo 'selected'; ?>>否</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- 第五行 -->
+        <div class="row">
+            <div class="column">
+                <a href="assets/tinyfilemanager/index.php?p=data&edit=customSource.php&env=ace" target="_blank" class="blue-span">
+                    编辑自定义数据源
+                </a>                  
+            </div>
+            <div class="column">
             </div>
             <div class="column">
             </div>
         </div>
 
         <!-- 其他设置 -->
-        <label for="gen_list_text">仅生成以下频道数据：</label>
+        <span>匹配频道列表：</span>
+        <label for="gen_list_text">（仅生成以下数据</label>
         <select id="gen_list_enable" name="gen_list_enable" style="width: 60px; margin-right: 0px;" required>
             <option value="1" <?php if (isset($Config['gen_list_enable']) && $Config['gen_list_enable'] == 1) echo 'selected'; ?>>是</option>
             <option value="0" <?php if (!isset($Config['gen_list_enable']) || $Config['gen_list_enable'] == 0) echo 'selected'; ?>>否</option>
         </select>
         <span>
-            （粘贴m3u、txt地址或内容，<span class="blue-span" onclick="parseSource()">解析</span> 后
+            ）（粘贴m3u、txt地址或内容，<span class="blue-span" onclick="parseSource()">解析</span> 后
             <span class="blue-span" onclick="showModal('channelmatch')">查看匹配</span>）
         </span>
         <br>

@@ -113,7 +113,7 @@ function updateConfigFields() {
         foreach (explode("\n", $mappings) as $line) {
             if ($line = trim($line)) {
                 list($search, $replace) = preg_split('/=》|=>/', $line);
-                $channel_mappings[trim($search)] = trim(str_replace("，", ",", trim($replace)), '[]');
+                $channel_mappings[trim($search)] = str_replace("，", ",", trim($replace));
             }
         }
     }
@@ -121,7 +121,7 @@ function updateConfigFields() {
     // 解析频道 EPG 数据
     $channel_bind_epg = isset($_POST['channel_bind_epg']) ? array_filter(array_reduce(json_decode($_POST['channel_bind_epg'], true), function($result, $item) {
         $epgSrc = preg_replace('/^【已停用】/', '', $item['epg_src']);
-        if (!empty($item['channels'])) $result[$epgSrc] = trim(str_replace("，", ",", trim($item['channels'])), '[]');
+        if (!empty($item['channels'])) $result[$epgSrc] = str_replace("，", ",", trim($item['channels']));
         return $result;
     }, [])) : $Config['channel_bind_epg'];
 
@@ -159,7 +159,7 @@ function updateConfigFields() {
     if ($oldConfig['start_time'] !== $start_time || $oldConfig['end_time'] !== $end_time || $oldConfig['interval_time'] !== $interval_time) {
         exec('php cron.php > /dev/null 2>/dev/null &');
     }
-
+    
     return ['db_type_set' => $db_type_set];
 }
 
@@ -174,8 +174,9 @@ try {
         $action_map = [
             'get_update_logs', 'get_cron_logs', 'get_channel', 'get_epg_by_channel',
             'get_icon', 'get_channel_bind_epg', 'get_channel_match', 'get_gen_list',
-            'get_live_data', 'parse_source_info', 'download_data', 'delete_unused_icons', 
-            'delete_unused_live_data', 'get_version_log'
+            'get_live_data', 'parse_source_info', 'download_source_data', 'delete_unused_icons', 
+            'delete_unused_live_data', 'get_version_log', 'get_readme_content', 'get_access_log',
+            'clear_access_log', 'get_ip_list', 'test_redis'
         ];
         $action = key(array_intersect_key($_GET, array_flip($action_map))) ?: '';
 
@@ -194,8 +195,14 @@ try {
             case 'get_channel':
                 // 获取频道
                 $channels = $db->query("SELECT DISTINCT channel FROM epg_data ORDER BY channel ASC")->fetchAll(PDO::FETCH_COLUMN);
+
+                // 将频道忽略字符插入到频道列表的开头
+                $channel_ignore_chars = [
+                    ['original' => '【频道忽略字符】', 'mapped' => $Config['channel_ignore_chars'] ?? "&nbsp, -"]
+                ];
+
                 $channelMappings = $Config['channel_mappings'];
-                $mappedChannels = [];
+                $mappedChannels = $channel_ignore_chars;
                 foreach ($channelMappings as $mapped => $original) {
                     if (($index = array_search(strtoupper($mapped), $channels)) !== false) {
                         $mappedChannels[] = [
@@ -341,7 +348,7 @@ try {
                 break;
             
             case 'get_live_data':
-                // 读取文件内容
+                // 读取直播源文件内容
                 function readFileContent($filePath) {
                     return file_exists($filePath) ? file_get_contents($filePath) : '';
                 }
@@ -396,8 +403,8 @@ try {
                 }
                 break;
 
-            case 'download_data':
-                // 下载数据
+            case 'download_source_data':
+                // 下载直播源数据
                 $url = filter_var(($_GET['url']), FILTER_VALIDATE_URL);
                 if ($url) {
                     $data = downloadData($url, '', 5);
@@ -448,44 +455,10 @@ try {
                     }
                 }
 
-                // 删除 modifications.csv 未在 channels.csv 中出现的条目
-                $channelsFilePath = $liveDir . 'channels.csv';
-                $modificationsFilePath = $liveDir . 'modifications.csv';
+                // 删除 modifications.csv 文件
+                @unlink($liveDir . 'modifications.csv');
                 
-                $deletedRecordCount = 0;
-                if (file_exists($channelsFilePath) && file_exists($modificationsFilePath)) {
-                    // 读取 channels.csv 中的 tag 字段
-                    $channelTags = [];
-                    $file = fopen($channelsFilePath, 'r');
-                    $header = fgetcsv($file);
-                    while (($row = fgetcsv($file)) !== false) {
-                        $channelTags[] = $row[array_search('tag', $header)];
-                    }
-                    fclose($file);
-                
-                    // 过滤 modifications.csv 数据并统计移除行数
-                    $file = fopen($modificationsFilePath, 'r');
-                    $modificationsHeader = fgetcsv($file);
-                    $filteredData = [];
-                    while (($row = fgetcsv($file)) !== false) {
-                        if (in_array($row[array_search('tag', $modificationsHeader)], $channelTags)) {
-                            $filteredData[] = $row;
-                        } else {
-                            $deletedRecordCount++;
-                        }
-                    }
-                    fclose($file);
-                
-                    // 写回过滤后的数据
-                    $file = fopen($modificationsFilePath, 'w');
-                    fputcsv($file, $modificationsHeader);
-                    foreach ($filteredData as $row) {
-                        fputcsv($file, $row);
-                    }
-                    fclose($file);
-                }
-                
-                $dbResponse = ['success' => true, 'message' => "共清理了 $deletedFileCount 个缓存文件， $deletedRecordCount 条修改记录。"];
+                $dbResponse = ['success' => true, 'message' => "共清理了 $deletedFileCount 个缓存文件。<br>已删除所有修改记录，请重新解析。"];
                 break;
 
             case 'get_version_log':
@@ -524,6 +497,70 @@ try {
                 require_once 'assets/Parsedown.php';
                 $htmlContent = (new Parsedown())->text($markdownContent);
                 $dbResponse = ['success' => true, 'content' => $updateMessage . $htmlContent, 'is_updated' => $isUpdated];
+                break;
+
+            case 'get_readme_content':
+                $readmeFile = 'assets/html/readme.md';
+                $readmeContent = file_exists($readmeFile) ? file_get_contents($readmeFile) : '';
+                require_once 'assets/Parsedown.php';
+                $htmlContent = (new Parsedown())->text($readmeContent);
+                $dbResponse = ['success' => true, 'content' => $htmlContent];
+                break;
+
+            case 'get_access_log':
+                $accesslogFile = 'data/access.log';
+                $offset = isset($_GET['offset']) ? (int)$_GET['offset'] : 0;
+            
+                if (!file_exists($accesslogFile)) {
+                    $dbResponse = ['success' => true, 'changed' => false];
+                    break;
+                }
+            
+                $filesize = filesize($accesslogFile);
+                if ($offset < $filesize) {
+                    $content = file_get_contents($accesslogFile, false, null, $offset);
+                    $dbResponse = ['success' => true, 'changed' => true, 'content' => $content, 'offset' => $filesize];
+                } else {
+                    $dbResponse = ['success' => true, 'changed' => false, 'offset' => $filesize];
+                }
+                break;
+
+            case 'clear_access_log':
+                $file = 'data/access.log';
+                $res = file_exists($file) && is_writable($file) && file_put_contents($file, '') !== false;
+                $dbResponse = ['success' => $res];
+                break;
+
+            case 'get_ip_list':
+                $filename = basename($_GET['file'] ?? 'ipBlackList.txt'); // 只允许基本文件名
+                $file_path = __DIR__ . "/data/{$filename}";
+            
+                if (file_exists($file_path)) {
+                    $content = file($file_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                    $dbResponse = ['success' => true, 'list' => $content];
+                } else {
+                    $dbResponse = ['success' => true, 'list' => []];
+                }
+                break;
+
+            case 'test_redis':
+                $redisConfig = $Config['redis'] ?? [];
+                try {
+                    $redis = new Redis();
+                    $redis->connect($redisConfig['host'] ?: '127.0.0.1', $redisConfig['port'] ? (int)$redisConfig['port'] : 6379);
+                    if (!empty($redisConfig['password'])) {
+                        $redis->auth($redisConfig['password']);
+                    }
+                    if ($redis->ping()) {
+                        $Config['cached_type'] = 'redis';
+                        file_put_contents($configPath, json_encode($Config, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+                        $dbResponse = ['success' => true];
+                    } else {
+                        $dbResponse = ['success' => false];
+                    }
+                } catch (Exception $e) {
+                    $dbResponse = ['success' => false];
+                }
                 break;
 
             default:
@@ -678,9 +715,13 @@ try {
                     echo json_encode(['success' => true]);
                 }
 
-                // 清理 memcached 数据，避免缓存
-                if (class_exists('Memcached') && ($memcached = new Memcached())->addServer('localhost', 11211)) {
+                // 清理缓存数据
+                $cached_type = $Config['cached_type'] ?? 'memcached';
+                if ($cached_type === 'memcached' && class_exists('Memcached') && ($memcached = new Memcached())->addServer('127.0.0.1', 11211)) {
                     $memcached->flush();
+                } elseif ($cached_type === 'redis' && class_exists('Redis') && ($redis = new Redis()) && $redis->connect($Config['redis']['host'], $Config['redis']['port']) 
+                    && (empty($Config['redis']['password']) || $redis->auth($Config['redis']['password'])) && $redis->ping()) {
+                    $redis->flushAll();
                 }
                 exit;
 
