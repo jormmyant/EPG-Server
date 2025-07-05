@@ -40,8 +40,6 @@ function deleteOldData($db, $thresholdDate, &$log_messages) {
 
     // 删除 t.xml 和 t.xml.gz 文件
     if (!$Config['gen_xml']) {
-        @unlink(__DIR__ . '/t.xml');
-        @unlink(__DIR__ . '/t.xml.gz');
         @unlink(__DIR__ . '/data/t.xml');
         @unlink(__DIR__ . '/data/t.xml.gz');
     }
@@ -61,19 +59,15 @@ function deleteOldData($db, $thresholdDate, &$log_messages) {
     }
 
     // 清理访问日志
-    if ($Config['debug_mode'] && file_exists($accessLogPath = __DIR__ . '/data/access.log')) {
-        $lines = file($accessLogPath);
+    if ($Config['debug_mode']) {
         $thresholdTimestamp = strtotime($thresholdDate . ' 00:00:00');
-        $start = 0;
-        foreach ($lines as $i => $line) {
-            if (preg_match('/\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/', $line, $m) && strtotime($m[1]) >= $thresholdTimestamp) {
-                $start = $i;
-                break;
-            }
-        }
-        $newLines = array_slice($lines, $start);
-        file_put_contents($accessLogPath, implode('', $newLines));
-        logMessage($log_messages, "【清理访问日志】 共 " . (count($lines) - count($newLines)) . " 条。");
+        $thresholdStr = date('Y-m-d H:i:s', $thresholdTimestamp);
+    
+        $stmt = $db->prepare("DELETE FROM access_log WHERE access_time < ?");
+        $stmt->execute([$thresholdStr]);
+    
+        $deletedCount = $stmt->rowCount();
+        logMessage($log_messages, "【清理访问日志】 共 $deletedCount 条。");
     }
     
     // 清理缓存数据
@@ -166,18 +160,16 @@ function getChannelBindEPG() {
 // 下载 XML 数据并存入数据库
 function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $white_list, $black_list, $timeZone) {
     global $Config;
-    $xml_data = downloadData($xml_url, $userAgent);
-    if ($xml_data !== false && stripos($xml_data, 'not found') === false) {
-        $mtimeStr = '';
+    [$xml_data, $error, $mtime] = downloadData($xml_url, $userAgent);
+    if ($xml_data !== false) {
         if (substr($xml_data, 0, 2) === "\x1F\x8B") { // 通过魔数判断 .gz 文件
-            if ($t = unpack('V', substr($xml_data, 4, 4))[1]) {
-                $mtimeStr = ' | 修改时间：' . date('Y-m-d H:i:s', $t);
-            }
+            $mtime = $mtime ?: unpack('V', substr($xml_data, 4, 4))[1];
             if (!($xml_data = gzdecode($xml_data))) {
                 logMessage($log_messages, '【解压失败】');
                 return;
             }
         }
+        $mtimeStr = $mtime ? ' | 修改时间：' . date('Y-m-d H:i:s', $mtime) : '';
 
         // 获取文件大小（字节）并转换为 KB/MB
         $fileSize = strlen($xml_data);
@@ -190,15 +182,15 @@ function downloadXmlData($xml_url, $userAgent, $db, &$log_messages, $gen_list, $
         if (($Config['cht_to_chs'] ?? 1) === 2) { $xml_data = t2s($xml_data); }
         $db->beginTransaction();
         try {
-            $processCount = processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black_list, $timeZone);
+            [$processCount, $skipCount] = processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black_list, $timeZone);
             $db->commit();
-            logMessage($log_messages, "【更新】 成功：共 {$processCount} 条");
+            logMessage($log_messages, "【更新】 成功：入库 {$processCount} 条，跳过 {$skipCount} 条");
         } catch (Exception $e) {
             $db->rollBack();
             logMessage($log_messages, "【处理数据出错！！！】 " . $e->getMessage());
         }
     } else {
-        logMessage($log_messages, "【下载】 失败！！！");
+        logMessage($log_messages, "【下载】 失败！！！错误信息：$error");
     }
     echo "<br>";
 }
@@ -208,7 +200,8 @@ function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black
     global $Config, $processedRecords, $channel_bind_epg, $thresholdDate;
 
     // 统计处理数据量
-    $processCount = 0;
+    $programmeCount = 0;
+    $skipCount = 0;
 
     $reader = new XMLReader();
     if (!$reader->XML($xml_data)) {
@@ -267,12 +260,14 @@ function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black
     $overwrite_time_zone = $timeZone ?: (strpos($xml_data, 'epg.pw') !== false ? '+0800' : '');
 
     while ($reader->name === 'programme') {
+        $programmeCount++;
         $programme = new SimpleXMLElement($reader->readOuterXML());
         [$startDate, $startTime] = getFormatTime((string)$programme['start'], $overwrite_time_zone);
         [$endDate, $endTime] = getFormatTime((string)$programme['stop'], $overwrite_time_zone);
 
         // 判断数据是否符合设定期限
         if (empty($startDate) || $startDate < $thresholdDate || empty($endDate)) {
+            $skipCount++;
             $reader->next('programme');
             continue;
         }
@@ -283,11 +278,7 @@ function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black
 
         // 优先处理跨天数据
         if (isset($crossDayProgrammes[$channelId][$startDate]) && !isset($processedRecords[$recordKey])) {
-            $currentChannelProgrammes[$channelId]['diyp_data'][$startDate] = array_merge(
-                $currentChannelProgrammes[$channelId]['diyp_data'][$startDate] ?? [],
-                $crossDayProgrammes[$channelId][$startDate]
-            );
-            $currentChannelProgrammes[$channelId]['channel_name'] = $channelName;
+            $currentChannelProgrammes[$channelId]['diyp_data'][$startDate] = $crossDayProgrammes[$channelId][$startDate];
             unset($crossDayProgrammes[$channelId][$startDate]);
         }
     
@@ -316,11 +307,11 @@ function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black
             // 每次达到 50 时，插入数据并保留最后一条
             if (count($currentChannelProgrammes) >= 50) {
                 $lastProgramme = array_pop($currentChannelProgrammes); // 取出最后一条
-                insertDataToDatabase($currentChannelProgrammes, $db, $xml_url); // 插入前 49 条
+                $skipCount += insertDataToDatabase($currentChannelProgrammes, $db, $xml_url); // 插入前 49 条
                 $currentChannelProgrammes = [$channelId => $lastProgramme]; // 清空并重新赋值最后一条
             }
-            
-            $processCount++;
+        } else{
+            $skipCount++;
         }
     
         $reader->next('programme');
@@ -328,12 +319,13 @@ function processXmlData($xml_url, $xml_data, $db, $gen_list, $white_list, $black
     
     // 插入剩余的数据
     if ($currentChannelProgrammes) {
-        insertDataToDatabase($currentChannelProgrammes, $db, $xml_url);
+        $skipCount += insertDataToDatabase($currentChannelProgrammes, $db, $xml_url);
     }
     
     $reader->close();
-    
-    return $processCount;
+
+    $processCount = $programmeCount - $skipCount;
+    return [$processCount, $skipCount];
 }
 
 // 从 epg_data 读取数据，生成 iconList.json 及 xmltv 文件
@@ -506,8 +498,8 @@ $getCount = function() use ($db) {
     return $count;
 };
 
+// 统计更新前数据条数
 $initialCount = $getCount();
-
 
 // 删除过期数据
 $thresholdDate = date('Y-m-d', strtotime("-{$Config['days_to_keep']} days +1 day"));
@@ -577,12 +569,13 @@ foreach ($Config['xml_urls'] as $xml_url) {
 processIconListAndXmltv($db, $gen_list_mapping, $log_messages);
 
 // 判断是否同步更新直播源
-if ($Config['live_source_auto_sync'] ?? false) {
-    $parseResult = doParseSourceInfo();
-    if ($parseResult !== true) {
-        logMessage($log_messages, "【直播文件】 部分更新异常：" . rtrim(str_replace('<br>', '、', $parseResult), '、'));
+if ($syncMode = $Config['live_source_auto_sync'] ?? false) {
+    $parseResult = $syncMode == 2 ? doParseSourceInfo(null, true) : doParseSourceInfo();
+    $tip = $syncMode == 2 ? '（所有配置）' : '（当前配置）';
+    if ($parseResult === true) {
+        logMessage($log_messages, "【直播文件】 已同步更新{$tip}");
     } else {
-        logMessage($log_messages, "【直播文件】 已同步更新");
+        logMessage($log_messages, "【直播文件】 部分更新异常{$tip}：" . rtrim(str_replace('<br>', '、', $parseResult), '、'));
     }
 }
 
