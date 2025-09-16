@@ -37,14 +37,22 @@ $userAgentRange = $Config['user_agent_range'] ?? 0;
 $live = in_array($query_params['type'] ?? '', ['m3u', 'txt']);
 $accessDenied = false;
 
-// 验证token
-if ($tokenRange !== 0) {
-    $allowedTokens = array_map('trim', explode(PHP_EOL, $Config['token'] ?? ''));
-    $token = $query_params['token'] ?? '';
-    if (!isAllowed($token, $allowedTokens, $tokenRange, (bool)$live)) {
-        $accessDenied = true;
-        $denyMessage = '访问被拒绝：无效Token。';
+// 验证 token
+$token = $query_params['token'] ?? '';
+$rawTokens = array_map('trim', explode(PHP_EOL, $Config['token'] ?? ''));
+
+// 生成允许的 token 列表
+$allowedTokens = $rawTokens;
+if (!empty($query_params['proxy'])) {
+    foreach ($rawTokens as $t) {
+        $allowedTokens[] = substr(md5($t), 0, 8);
     }
+}
+
+// 验证 token
+if ($tokenRange !== 0 && !isAllowed($token, $allowedTokens, $tokenRange, (bool)$live)) {
+    $accessDenied = true;
+    $denyMessage = '访问被拒绝：无效Token。';
 }
 
 // 验证 User-Agent
@@ -322,6 +330,22 @@ function liveFetchHandler($query_params) {
     if ($query_params['type'] === 'm3u') {
         $content = preg_replace('/(#EXTM3U x-tvg-url=")(.*?)(")/', '$1' . $tvgUrl . '$3', $content, 1);
         $content = str_replace("tvg-logo=\"/data/icon/", "tvg-logo=\"$serverUrl/data/icon/", $content);
+    }
+
+    // 如果启用代理模式
+    if (!empty($query_params['proxy'])) {
+        if ($query_params['type'] === 'm3u') {
+            $content = preg_replace_callback('/^(?!#)(.+)$/m', function ($matches) use ($Config, $serverUrl) {
+                $encUrl = urlencode(encryptUrl(trim($matches[1]), $Config['token']));
+                return $serverUrl . '/proxy.php?url=' . $encUrl;
+            }, $content);
+    
+        } elseif ($query_params['type'] === 'txt') {
+            $content = preg_replace_callback('/^([^,#]+),(?!#)(.+)$/m', function ($matches) use ($Config, $serverUrl) {
+                $encUrl = urlencode(encryptUrl(trim($matches[2]), $Config['token']));
+                return $matches[1] . ',' . $serverUrl . '/proxy.php?url=' . $encUrl;
+            }, $content);
+        }
     }
 
     echo $content;

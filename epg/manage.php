@@ -24,42 +24,49 @@ if ($Config['interval_time'] !== 0) {
     }
 }
 
-// 过渡到新的 md5 密码并生成默认 token、user_agent （如果不存在或为空）
-if (!preg_match('/^[a-f0-9]{32}$/i', $Config['manage_password']) || empty($Config['token']) || empty($Config['user_agent'])) {
-    if (!preg_match('/^[a-f0-9]{32}$/i', $Config['manage_password'])) {
-        $Config['manage_password'] = md5($Config['manage_password']);
+// 简单随机字符串函数
+function randStr($len = 10) {
+    return substr(bin2hex(random_bytes($len)), 0, $len);
+}
+
+$needSave = false;
+
+// 首次使用，提示修改密码
+$forceChangePassword = empty($Config['manage_password']);
+
+// 统一检查几个字段
+foreach (['token', 'user_agent'] as $k) {
+    if (empty($Config[$k])) {
+        $Config[$k] = randStr();
+        $needSave = true;
     }
-    if (empty($Config['token'])) {
-        $Config['token'] = substr(bin2hex(random_bytes(5)), 0, 10);  // 生成 10 位随机字符串
-    }
-    if (empty($Config['user_agent'])) {
-        $Config['user_agent'] = substr(bin2hex(random_bytes(5)), 0, 10);  // 生成 10 位随机字符串
-    }
-    file_put_contents($configPath, json_encode($Config, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+if ($needSave) {
+    file_put_contents(
+        $configPath,
+        json_encode($Config, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
+    );
 }
 
 // 处理密码更新请求
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['change_password'])) {
-    $oldPassword = md5($_POST['old_password']);
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
     $newPassword = md5($_POST['new_password']);
 
-    // 验证原密码是否正确
-    if ($oldPassword === $Config['manage_password']) {
-        // 原密码正确，更新配置中的密码
-        $Config['manage_password'] = $newPassword;
-
-        // 将新配置写回 config.json
-        file_put_contents($configPath, json_encode($Config, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-
-        // 设置密码更改成功的标志变量
-        $passwordChanged = true;
-    } else {
+    // 如果不是强制设置密码，则验证原密码
+    if (empty($forceChangePassword) && md5($_POST['old_password']) !== $Config['manage_password']) {
         $passwordChangeError = "原密码错误";
+    } else {
+        // 更新密码并写入配置
+        $Config['manage_password'] = $newPassword;
+        file_put_contents($configPath, json_encode($Config, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        $passwordChanged = true;
+        $forceChangePassword = false;
     }
 }
 
 // 检查是否提交登录表单
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['login'])) {
     $password = md5($_POST['password']);
 
     // 验证密码
@@ -96,7 +103,11 @@ function updateConfigFields() {
     }, ARRAY_FILTER_USE_KEY));
     
     foreach ($config_keys as $key) {
-        ${$key} = is_numeric($_POST[$key]) ? intval($_POST[$key]) : $_POST[$key];
+        if ($key === 'target_time_zone') {
+            ${$key} = ($_POST[$key] === '0') ? 0 : $_POST[$key];
+        } else {
+            ${$key} = is_numeric($_POST[$key]) ? intval($_POST[$key]) : $_POST[$key];
+        }
     }
 
     // 处理 URL 列表和频道别名
@@ -168,12 +179,12 @@ try {
     $requestMethod = $_SERVER['REQUEST_METHOD'];
     $dbResponse = null;
 
-    if ($requestMethod == 'GET') {
+    if ($requestMethod === 'GET') {
 
         // 确定操作类型
         $action_map = [
-            'get_update_logs', 'get_cron_logs', 'get_channel', 'get_epg_by_channel',
-            'get_icon', 'get_channel_bind_epg', 'get_channel_match', 'get_gen_list',
+            'get_config', 'get_env', 'get_update_logs', 'get_cron_logs', 'get_channel', 
+            'get_epg_by_channel', 'get_icon', 'get_channel_bind_epg', 'get_channel_match', 'get_gen_list',
             'get_live_data', 'parse_source_info', 'download_source_data', 'delete_unused_icons', 
             'delete_source_config', 'delete_unused_live_data', 'get_version_log', 'get_readme_content', 
             'get_access_log', 'get_access_stats', 'clear_access_log', 'get_ip_list', 'test_redis'
@@ -182,6 +193,25 @@ try {
 
         // 根据操作类型执行不同的逻辑
         switch ($action) {
+            case 'get_config':
+                // 获取配置信息
+                $dbResponse = $Config;
+                
+                // 同时返回 MD5 token
+                if (isset($dbResponse['token'])) {
+                    $dbResponse['token_md5'] = substr(md5($dbResponse['token']), 0, 8);
+                }
+                break;
+
+            case 'get_env':
+                // 获取 serverUrl、modRewrite
+                $modRewrite = false;
+                if (function_exists('apache_get_modules') && in_array('mod_rewrite', apache_get_modules())) {
+                    $modRewrite = true;
+                }
+                $dbResponse = ['server_url' => $serverUrl, 'mod_rewrite' => $modRewrite];
+                break;
+
             case 'get_update_logs':
                 // 获取更新日志
                 $dbResponse = $db->query("SELECT * FROM update_log")->fetchAll(PDO::FETCH_ASSOC);
@@ -538,7 +568,7 @@ try {
                 }
 
                 $localFile = 'data/CHANGELOG.md';
-                $url = 'https://gitee.com/taksssss/EPG-Server/raw/main/CHANGELOG.md';
+                $url = 'https://gitee.com/taksssss/iptv-tool/raw/main/CHANGELOG.md';
                 $isUpdated = false;
                 $updateMessage = '';
                 if ($checkUpdate) {
@@ -681,8 +711,13 @@ try {
         }
 
         if ($dbResponse !== null) {
-            header('Content-Type: application/json');
-            echo json_encode($dbResponse);
+            header('Content-Type: application/json; charset=utf-8');
+            $json = json_encode($dbResponse);
+            if ($json === false) { // 如果失败，尝试修复编码再输出
+                $dbResponse = mb_convert_encoding($dbResponse, 'UTF-8', 'UTF-8');
+                $json = json_encode($dbResponse);
+            }
+            echo $json;
             exit;
         }
     }
