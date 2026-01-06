@@ -4,13 +4,13 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!localStorage.getItem('hasVisitedBefore') && 
         (!document.getElementById('xml_urls')?.value.trim())) {
         showHelpModal();
-        localStorage.setItem('hasVisitedBefore', 'true');
+        localStorage.setItem('hasVisitedBefore', 1);
     }
 
     showModal('live', popup = false);
     showModal('channel', popup = false);
     showModal('update', popup = false);
-    showVersionLog(doCheckUpdate = true);
+    showVersionLog(doCheckUpdate = 1);
 });
 
 // 提交配置表单
@@ -318,10 +318,7 @@ function showExecResult(fileName, callback, fullSize = true) {
 
     // 创建 XMLHttpRequest 对象
     const xhr = new XMLHttpRequest();
-    xhr.open('GET', `${fileName}`, true);
-
-    // 显式设置 X-Requested-With 请求头
-    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+    xhr.open('GET', fileName, true);
 
     // 处理接收到的数据
     xhr.onprogress = function () {
@@ -330,12 +327,9 @@ function showExecResult(fileName, callback, fullSize = true) {
     };
 
     xhr.onload = function () {
-        if (xhr.status === 200) {
-            // 确保执行完成后调用回调
-            if (typeof callback === 'function') {
-                callback();
-            }
-        } else {
+        if (xhr.status === 200 && typeof callback === 'function') {
+            callback();
+        } else if (xhr.status !== 200) {
             wrapper.innerHTML += '<p>检测失败，请检查服务器。</p>';
         }
     };
@@ -356,7 +350,7 @@ function showExecResult(fileName, callback, fullSize = true) {
 }
 
 // 显示版本更新日志
-function showVersionLog(doCheckUpdate = false) {
+function showVersionLog(doCheckUpdate = 0) {
     fetch(`manage.php?get_version_log=1&do_check_update=${doCheckUpdate}`)
         .then(response => response.json())
         .then(data => {
@@ -464,7 +458,7 @@ function changeCachedType(selectElem) {
 
 // 通用：将字段写入 config.json
 function saveConfigField(params) {
-    params.update_config_field = 'true';
+    params.update_config_field = 1;
     return fetch('manage.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -641,7 +635,7 @@ function formatLogLine(text) {
 
     // 如果包含「访问被拒绝」，整行加粗+标红
     if (text.includes('访问被拒绝')) {
-        result = `<span style="color:red; font-weight:bold;">${result}</span>`;
+        result = `<span style="color:red; font-weight:bold; user-select:text;">${result}</span>`;
     }
 
     return result;
@@ -836,7 +830,7 @@ function addIp(ip, type) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: new URLSearchParams({
-                    save_content_to_file: 'true',
+                    save_content_to_file: 1,
                     file_path: `/data/${file}`,
                     content: [...set].join('\n')
                 })
@@ -934,7 +928,7 @@ function saveIpList() {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-            save_content_to_file: 'true',
+            save_content_to_file: 1,
             file_path: `/data/${file}`,
             content: textarea.value
         })
@@ -1482,7 +1476,7 @@ function saveLiveSourceFile() {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-            save_content_to_file: 'true',
+            save_content_to_file: 1,
             file_path: '/data/live/source.json',
             content: JSON.stringify(updateObj)
         })
@@ -1507,13 +1501,12 @@ function saveLiveSourceInfo() {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-            save_source_info: 'true',
+            save_source_info: 1,
             live_source_config: liveSourceConfig,
             live_tvg_logo_enable: liveTvgLogoEnable,
             live_tvg_id_enable: liveTvgIdEnable,
             live_tvg_name_enable: liveTvgNameEnable,
-            content: JSON.stringify(dataToSend),
-            batch_update: 'true'
+            content: JSON.stringify(dataToSend)
         })
     })
     .then(response => response.json())
@@ -1570,7 +1563,7 @@ function openLiveSourceConfigDialog(isNew = 0) {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: new URLSearchParams({
-                create_source_config: 'true',
+                create_source_config: 1,
                 old_source_config: oldConfig,
                 new_source_config: liveSourceConfig,
                 is_new: isNew
@@ -1659,7 +1652,7 @@ async function showLiveUrl() {
         const token      = configData.token.split('\n')[0];
         const tokenMd5   = configData.token_md5;
         const tokenRange = parseInt(configData.token_range, 10);
-        const redirect = serverData.redirect ? true : false;
+        const rewriteEnable = serverData.rewrite_enable ? true : false;
 
         // live_source_config 仍从页面 select/input 获取
         const liveSourceElem = document.getElementById('live_source_config');
@@ -1669,8 +1662,8 @@ async function showLiveUrl() {
         const urlParam = (configValue === 'default') ? '' : `url=${configValue}`;
         const query = [tokenStr, urlParam].filter(Boolean).join('&');
 
-        const m3uPath = redirect ? '/tv.m3u' : '/index.php?type=m3u';
-        const txtPath = redirect ? '/tv.txt' : '/index.php?type=txt';
+        const m3uPath = rewriteEnable ? '/tv.m3u' : '/index.php?type=m3u';
+        const txtPath = rewriteEnable ? '/tv.txt' : '/index.php?type=txt';
 
         function buildUrl(base, path, query) {
             let url = base + path;
@@ -1734,7 +1727,7 @@ function saveLiveTemplate() {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-            save_content_to_file: 'true',
+            save_content_to_file: 1,
             file_path: '/data/live/template.json',
             content: JSON.stringify(updateObj)
         })
@@ -2002,10 +1995,10 @@ async function parseSource() {
                     const response = await fetch('manage.php?download_source_data=1&url=' + encodeURIComponent(url));
                     const result = await response.json(); // 解析 JSON 响应
                     
-                    if (result.success && !/not found/i.test(result.data)) {
+                    if (result.success) {
                         text += '\n' + result.data;
                     } else {
-                        showMessageModal(/not found/i.test(result.data) ? `Error: ${result.data}` : `${result.message}：\n${url}`);
+                        showMessageModal(`${result.message}：\n${url}`);
                     }
                 } catch (error) {
                     showMessageModal(`无法获取URL内容: ${url}\n错误信息: ${error.message}`); // 显示网络错误信息
@@ -2113,7 +2106,7 @@ function updateIconListJsonFile(notify = false) {
                 'Content-Type': 'application/x-www-form-urlencoded',
             },
             body: new URLSearchParams({
-                update_icon_list: true,
+                update_icon_list: 1,
                 updatedIcons: JSON.stringify(allIcons) // 传递更新后的图标数据
             })
         })
@@ -2227,21 +2220,21 @@ async function showTokenRangeMessage() {
 
         const serverUrl  = serverData.server_url;
         const tokenFull  = configData.token;
-        const redirect = serverData.redirect ? true : false;
+        const rewriteEnable = serverData.rewrite_enable ? true : false;
         const token = tokenFull.split('\n')[0];
         let message = '';
 
         if (tokenRange === "1" || tokenRange === "3") {
-            const m3u = redirect ? `${serverUrl}/tv.m3u?token=${token}` : `${serverUrl}/index.php?type=m3u&token=${token}`;
-            const txt = redirect ? `${serverUrl}/tv.txt?token=${token}` : `${serverUrl}/index.php?type=txt&token=${token}`;
+            const m3u = rewriteEnable ? `${serverUrl}/tv.m3u?token=${token}` : `${serverUrl}/index.php?type=m3u&token=${token}`;
+            const txt = rewriteEnable ? `${serverUrl}/tv.txt?token=${token}` : `${serverUrl}/index.php?type=txt&token=${token}`;
             message += `直播源地址：<br><a href="${m3u}" target="_blank">${m3u}</a><br>
                         <a href="${txt}" target="_blank">${txt}</a>`;
         }
 
         if (tokenRange === "2" || tokenRange === "3") {
             if (message) message += '<br>';
-            const xml = redirect ? `${serverUrl}/t.xml?token=${token}` : `${serverUrl}/index.php?type=xml&token=${token}`;
-            const gz = redirect ? `${serverUrl}/t.xml.gz?token=${token}` : `${serverUrl}/index.php?type=gz&token=${token}`;
+            const xml = rewriteEnable ? `${serverUrl}/t.xml?token=${token}` : `${serverUrl}/index.php?type=xml&token=${token}`;
+            const gz = rewriteEnable ? `${serverUrl}/t.xml.gz?token=${token}` : `${serverUrl}/index.php?type=gz&token=${token}`;
             message += `EPG地址：<br><a href="${serverUrl}/index.php?token=${token}" target="_blank">${serverUrl}/index.php?token=${token}</a><br>
                         <a href="${xml}" target="_blank">${xml}</a><br>
                         <a href="${gz}" target="_blank">${gz}</a>`;
@@ -2300,7 +2293,7 @@ function updateNotifyInfo() {
 }
 
 // 监听 access_log_enable 更变
-function debugMode(selectElem) {
+function accessLogEnable(selectElem) {
     document.getElementById("accessLogBtn").style.display = selectElem.value === "1" ? "inline-block" : "none";
 }
 
